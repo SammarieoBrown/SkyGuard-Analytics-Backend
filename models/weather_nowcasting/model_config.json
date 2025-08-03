@@ -1,0 +1,38 @@
+{
+  "model_info": {
+    "architecture": "MinimalConvLSTM",
+    "version": "1.0.0",
+    "training_date": "2024-08-03",
+    "input_shape": [10, 64, 64, 1],
+    "output_shape": [6, 64, 64, 1],
+    "filters": 16,
+    "trained_sites": ["KAMX", "KATX"],
+    "training_accuracy": 0.9998,
+    "precipitation_accuracy": 0.9998
+  },
+  "preprocessing": {
+    "input_resolution": [64, 64],
+    "normalization": "min_max_0_1",
+    "sequence_length": 10,
+    "prediction_length": 6
+  },
+  "model_files": {
+    "best_model": "best_model.keras",
+    "final_model": "final_simple_model.keras",
+    "primary": "best_model.keras"
+  },
+  "radar_sites": {
+    "KAMX": {
+      "name": "Miami",
+      "location": "Miami, FL",
+      "coordinates": [25.6112, -80.4128],
+      "description": "Atlantic hurricanes, tropical storms"
+    },
+    "KATX": {
+      "name": "Seattle", 
+      "location": "Seattle, WA",
+      "coordinates": [48.1947, -122.4956],
+      "description": "Pacific Northwest storms, mountain effects"
+    }
+  }
+}

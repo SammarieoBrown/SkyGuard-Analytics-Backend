@@ -1,0 +1,308 @@
+# Test your FastAPI endpoints
+
+GET http://127.0.0.1:8000/
+Accept: application/json
+
+###
+
+GET http://127.0.0.1:8000/hello/User
+Accept: application/json
+
+###
+
+# Test property damage prediction endpoint
+POST http://127.0.0.1:8000/api/v1/impact/property-damage
+Content-Type: application/json
+
+{
+  "event_type": "Thunderstorm Wind",
+  "state": "TX",
+  "magnitude": 65.0,
+  "duration_hours": 1.5,
+  "month": 6,
+  "hour": 14,
+  "latitude": 32.7767,
+  "longitude": -96.7970
+}
+
+###
+
+# Test property damage prediction endpoint with minimal data
+POST http://127.0.0.1:8000/api/v1/impact/property-damage
+Content-Type: application/json
+
+{
+  "event_type": "Tornado",
+  "state": "OK",
+  "tor_f_scale": "EF3"
+}
+
+###
+
+# Test casualty risk prediction endpoint
+POST http://127.0.0.1:8000/api/v1/impact/casualty-risk
+Content-Type: application/json
+
+{
+  "event_type": "Tornado",
+  "state": "OK",
+  "magnitude": 150.0,
+  "duration_hours": 0.5,
+  "month": 5,
+  "hour": 16,
+  "tor_f_scale": "EF3",
+  "cz_name": "Oklahoma County"
+}
+
+###
+
+# Test casualty risk prediction endpoint with minimal data
+POST http://127.0.0.1:8000/api/v1/impact/casualty-risk
+Content-Type: application/json
+
+{
+  "event_type": "Flood",
+  "state": "LA"
+}
+
+###
+
+# Test severity prediction endpoint
+POST http://127.0.0.1:8000/api/v1/impact/severity
+Content-Type: application/json
+
+{
+  "event_type": "Tornado",
+  "state": "OK",
+  "magnitude": 150.0,
+  "duration_hours": 0.5,
+  "property_damage": 500000.0,
+  "crop_damage": 50000.0,
+  "injuries": 15,
+  "deaths": 2,
+  "month": 5,
+  "hour": 16,
+  "tor_f_scale": "EF3",
+  "cz_type": "C"
+}
+
+###
+
+# Test severity prediction endpoint with minimal data
+POST http://127.0.0.1:8000/api/v1/impact/severity
+Content-Type: application/json
+
+{
+  "event_type": "Thunderstorm Wind",
+  "state": "FL",
+  "magnitude": 75.0
+}
+
+###
+
+# Test comprehensive assessment endpoint
+POST http://127.0.0.1:8000/api/v1/impact/comprehensive-assessment
+Content-Type: application/json
+
+{
+  "event_type": "Hurricane",
+  "state": "FL",
+  "magnitude": 130.0,
+  "duration_hours": 5.0,
+  "property_damage": 2000000.0,
+  "crop_damage": 500000.0,
+  "injuries": 25,
+  "deaths": 5,
+  "month": 9,
+  "hour": 14,
+  "cz_type": "Z"
+}
+
+###
+
+# Test state risk endpoint (POST)
+POST http://127.0.0.1:8000/api/v1/risk/state
+Content-Type: application/json
+
+{
+  "state_code": "TX"
+}
+
+###
+
+# Test state risk endpoint (GET)
+GET http://127.0.0.1:8000/api/v1/risk/state/FL
+Accept: application/json
+
+###
+
+# Test multi-state risk endpoint
+POST http://127.0.0.1:8000/api/v1/risk/multi-state
+Content-Type: application/json
+
+{
+  "state_codes": ["TX", "FL", "CA"]
+}
+
+###
+
+# Test risk rankings endpoint (POST)
+POST http://127.0.0.1:8000/api/v1/risk/rankings
+Content-Type: application/json
+
+{
+  "limit": 5,
+  "ascending": false
+}
+
+###
+
+# Test risk rankings endpoint (GET)
+GET http://127.0.0.1:8000/api/v1/risk/rankings?limit=3&ascending=false
+Accept: application/json
+
+###
+
+# Test event type risk endpoint (POST)
+POST http://127.0.0.1:8000/api/v1/risk/event-type
+Content-Type: application/json
+
+{
+  "event_type": "Tornado"
+}
+
+###
+
+# Test event type risk endpoint (GET)
+GET http://127.0.0.1:8000/api/v1/risk/event-type/Hurricane
+Accept: application/json
+
+###
+
+# Test risk summary endpoint
+GET http://127.0.0.1:8000/api/v1/risk/summary
+Accept: application/json
+
+###
+
+# Test scenario simulation endpoint
+POST http://127.0.0.1:8000/api/v1/simulation/scenario
+Content-Type: application/json
+
+{
+  "base_event": {
+    "event_type": "Tornado",
+    "state": "OK",
+    "magnitude": 150.0,
+    "duration_hours": 0.5,
+    "month": 5,
+    "hour": 16,
+    "tor_f_scale": "EF3"
+  },
+  "modifications": [
+    {
+      "parameter": "magnitude",
+      "modification_type": "multiply",
+      "value": 1.5
+    },
+    {
+      "parameter": "tor_f_scale",
+      "modification_type": "set",
+      "value": "EF4"
+    }
+  ],
+  "include_uncertainty": true
+}
+
+###
+
+# Test batch scenario simulation endpoint
+POST http://127.0.0.1:8000/api/v1/simulation/batch
+Content-Type: application/json
+
+{
+  "base_event": {
+    "event_type": "Tornado",
+    "state": "OK",
+    "magnitude": 150.0,
+    "duration_hours": 0.5,
+    "month": 5,
+    "hour": 16,
+    "tor_f_scale": "EF3"
+  },
+  "scenario_sets": [
+    [
+      {
+        "parameter": "magnitude",
+        "modification_type": "multiply",
+        "value": 1.5
+      }
+    ],
+    [
+      {
+        "parameter": "tor_f_scale",
+        "modification_type": "set",
+        "value": "EF4"
+      }
+    ]
+  ],
+  "include_uncertainty": false
+}
+
+###
+
+# Test sensitivity analysis endpoint
+POST http://127.0.0.1:8000/api/v1/simulation/sensitivity
+Content-Type: application/json
+
+{
+  "base_event": {
+    "event_type": "Tornado",
+    "state": "OK",
+    "magnitude": 150.0,
+    "duration_hours": 0.5,
+    "month": 5,
+    "hour": 16,
+    "tor_f_scale": "EF3"
+  },
+  "parameters": ["magnitude", "duration_hours"],
+  "variation_range": 0.5
+}
+
+###
+
+# Test get saved scenario endpoint
+GET http://127.0.0.1:8000/api/v1/simulation/scenario/scenario_123456
+Accept: application/json
+
+###
+
+# Test get saved scenario as report endpoint
+GET http://127.0.0.1:8000/api/v1/simulation/scenario/scenario_123456?format=report
+Accept: application/json
+
+###
+
+# Test API health endpoint 
+GET http://127.0.0.1:8000/health
+Accept: application/json
+
+###
+
+# Test impact service health endpoint
+GET http://127.0.0.1:8000/api/v1/impact/healthcheck
+Accept: application/json
+
+###
+
+# Test risk service health endpoint
+GET http://127.0.0.1:8000/api/v1/risk/healthcheck
+Accept: application/json
+
+###
+
+# Test simulation service health endpoint
+GET http://127.0.0.1:8000/api/v1/simulation/healthcheck
+Accept: application/json
+
+###
