@@ -262,6 +262,188 @@ class ErrorResponse(BaseModel):
     }
 
 
+# New schemas for raw radar data endpoints
+
+class CoordinateMetadata(BaseModel):
+    """Geographic coordinate metadata for radar data."""
+    bounds: List[float] = Field(..., description="Geographic bounds [west, east, south, north] in degrees")
+    center: List[float] = Field(..., description="Center coordinates [latitude, longitude]")
+    resolution_deg: float = Field(..., description="Degrees per pixel resolution")
+    resolution_km: float = Field(..., description="Kilometers per pixel resolution")
+    projection: str = Field(default="PlateCarree", description="Map projection used")
+    range_km: int = Field(default=150, description="Radar range in kilometers")
+    
+    @validator('bounds')
+    def validate_bounds(cls, v):
+        if len(v) != 4:
+            raise ValueError('Bounds must be [west, east, south, north]')
+        if v[0] >= v[1] or v[2] >= v[3]:
+            raise ValueError('Invalid bounds: west >= east or south >= north')
+        return v
+    
+    @validator('center')
+    def validate_center(cls, v):
+        if len(v) != 2:
+            raise ValueError('Center must be [latitude, longitude]')
+        if not (-90 <= v[0] <= 90):
+            raise ValueError('Latitude must be between -90 and 90')
+        if not (-180 <= v[1] <= 180):
+            raise ValueError('Longitude must be between -180 and 180')
+        return v
+
+
+class RadarDataFrame(BaseModel):
+    """Single radar data frame with processed data and coordinates."""
+    timestamp: datetime = Field(..., description="Timestamp of the radar data")
+    data: List[List[float]] = Field(..., description="Processed radar data array (64x64)")
+    coordinates: CoordinateMetadata = Field(..., description="Geographic coordinate information")
+    intensity_range: List[float] = Field(..., description="[min, max] intensity values in the data")
+    data_quality: str = Field(..., description="Quality assessment of the data")
+    processing_metadata: Optional[Dict[str, Any]] = Field(
+        default=None, 
+        description="Processing information and statistics"
+    )
+    
+    @validator('data')
+    def validate_data_dimensions(cls, v):
+        if len(v) != 64:
+            raise ValueError('Data must have 64 rows')
+        for row in v:
+            if len(row) != 64:
+                raise ValueError('Each row must have 64 columns')
+        return v
+    
+    @validator('intensity_range')
+    def validate_intensity_range(cls, v):
+        if len(v) != 2:
+            raise ValueError('Intensity range must be [min, max]')
+        if v[0] > v[1]:
+            raise ValueError('Min intensity cannot be greater than max')
+        return v
+    
+    model_config = {
+        "json_encoders": {
+            datetime: lambda v: v.isoformat()
+        }
+    }
+
+
+class RawRadarDataResponse(BaseModel):
+    """Response schema for raw radar data endpoints."""
+    success: bool = Field(default=True, description="Whether request was successful")
+    site_info: RadarSiteInfo = Field(..., description="Information about the radar site")
+    frames: List[RadarDataFrame] = Field(..., description="List of radar data frames")
+    total_frames: int = Field(..., description="Total number of frames returned")
+    time_range: Dict[str, datetime] = Field(..., description="Start and end times of data")
+    processing_time_ms: float = Field(..., description="Processing time in milliseconds")
+    cache_performance: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Cache hit/miss statistics"
+    )
+    request_timestamp: datetime = Field(default_factory=datetime.now, description="When request was processed")
+    
+    model_config = {
+        "json_encoders": {
+            datetime: lambda v: v.isoformat()
+        }
+    }
+
+
+class TimeSeriesRadarResponse(BaseModel):
+    """Response schema for time-series radar data requests."""
+    success: bool = Field(default=True, description="Whether request was successful")
+    site_info: RadarSiteInfo = Field(..., description="Information about the radar site")
+    frames: List[RadarDataFrame] = Field(..., description="Time-ordered radar data frames")
+    total_frames: int = Field(..., description="Total number of frames in time series")
+    time_range: Dict[str, datetime] = Field(..., description="Requested start and end times")
+    actual_time_range: Dict[str, datetime] = Field(..., description="Actual start and end times of returned data")
+    temporal_resolution_minutes: float = Field(..., description="Average time between frames in minutes")
+    data_completeness: float = Field(..., description="Percentage of requested time range covered (0-1)")
+    processing_time_ms: float = Field(..., description="Processing time in milliseconds")
+    request_timestamp: datetime = Field(default_factory=datetime.now, description="When request was processed")
+    
+    model_config = {
+        "json_encoders": {
+            datetime: lambda v: v.isoformat()
+        }
+    }
+
+
+class MultiSiteRadarResponse(BaseModel):
+    """Response schema for multi-site radar data requests."""
+    success: bool = Field(default=True, description="Whether request was successful")
+    site_data: Dict[str, RawRadarDataResponse] = Field(..., description="Radar data by site_id")
+    successful_sites: int = Field(..., description="Number of sites with successful data retrieval")
+    failed_sites: int = Field(..., description="Number of sites that failed")
+    total_sites: int = Field(..., description="Total number of sites requested")
+    composite_bounds: Optional[CoordinateMetadata] = Field(
+        default=None,
+        description="Combined geographic bounds for all sites"
+    )
+    processing_time_ms: float = Field(..., description="Total processing time in milliseconds")
+    request_timestamp: datetime = Field(default_factory=datetime.now, description="When request was processed")
+    
+    model_config = {
+        "json_encoders": {
+            datetime: lambda v: v.isoformat()
+        }
+    }
+
+
+class RadarFrameRequest(BaseModel):
+    """Request schema for single radar frame requests."""
+    site_id: str = Field(..., description="Radar site identifier")
+    timestamp: Optional[datetime] = Field(
+        default=None,
+        description="Specific timestamp to retrieve (default: latest)"
+    )
+    include_coordinates: bool = Field(
+        default=True,
+        description="Include coordinate metadata in response"
+    )
+    include_processing_metadata: bool = Field(
+        default=False,
+        description="Include detailed processing information"
+    )
+    
+    @validator('site_id')
+    def validate_site_id(cls, v):
+        allowed_sites = ['KAMX', 'KATX']
+        if v not in allowed_sites:
+            raise ValueError(f'Site must be one of {allowed_sites}')
+        return v
+
+
+class TimeSeriesRequest(BaseModel):
+    """Request schema for time-series radar data."""
+    site_id: str = Field(..., description="Radar site identifier")
+    start_time: datetime = Field(..., description="Start time for data retrieval")
+    end_time: datetime = Field(..., description="End time for data retrieval")
+    max_frames: Optional[int] = Field(
+        default=50,
+        ge=1,
+        le=200,
+        description="Maximum number of frames to return"
+    )
+    include_processing_metadata: bool = Field(
+        default=False,
+        description="Include detailed processing information"
+    )
+    
+    @validator('site_id')
+    def validate_site_id(cls, v):
+        allowed_sites = ['KAMX', 'KATX']
+        if v not in allowed_sites:
+            raise ValueError(f'Site must be one of {allowed_sites}')
+        return v
+    
+    @validator('end_time')
+    def validate_time_range(cls, v, values):
+        if 'start_time' in values and v <= values['start_time']:
+            raise ValueError('End time must be after start time')
+        return v
+
+
 # Common response models for API documentation
 class SuccessResponse(BaseModel):
     """Generic success response."""

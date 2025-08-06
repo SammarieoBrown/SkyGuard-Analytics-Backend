@@ -39,14 +39,14 @@ APP_VERSION = os.getenv("APP_VERSION", "1.0.0")
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 
 # Model paths (using local paths within SkyGuard Analytics)
-MODELS_DIR = BASE_DIR / "models"
-PROPERTY_DAMAGE_MODEL_PATH = MODELS_DIR / "app" / "models" / "property_damage" / "histgradientboosting_model.pkl"
-CASUALTY_RISK_MODEL_PATH = MODELS_DIR / "app" / "models" / "casualty_risk" / "casualty_risk_model.pkl"
-SEVERITY_MODEL_PATH = MODELS_DIR / "app" / "models" / "severity" / "best_severity_model.pkl"
-STATE_RISK_SCORES_PATH = MODELS_DIR / "app" / "models" / "risk_scoring" / "state_risk_scores.pkl"
+MODELS_DIR = BASE_DIR / "app" / "models"
+PROPERTY_DAMAGE_MODEL_PATH = MODELS_DIR / "property_damage" / "histgradientboosting_model.pkl"
+CASUALTY_RISK_MODEL_PATH = MODELS_DIR / "casualty_risk" / "casualty_risk_model.pkl"
+SEVERITY_MODEL_PATH = MODELS_DIR / "severity" / "best_severity_model.pkl"
+STATE_RISK_SCORES_PATH = MODELS_DIR / "risk_scoring" / "state_risk_scores.pkl"
 
 # Weather Nowcasting Model Configuration
-WEATHER_NOWCASTING_MODEL_DIR = MODELS_DIR / "weather_nowcasting"
+WEATHER_NOWCASTING_MODEL_DIR = BASE_DIR / "models" / "weather_nowcasting"
 WEATHER_NOWCASTING_MODEL_PATH = WEATHER_NOWCASTING_MODEL_DIR / "best_model.keras"
 WEATHER_NOWCASTING_CONFIG_PATH = WEATHER_NOWCASTING_MODEL_DIR / "model_config.json"
 

@@ -1,96 +1,65 @@
 """
-Redis Cache Service - High-performance caching for processed radar data.
+In-Memory Cache Service - Simple caching for processed radar data.
 Provides intelligent caching for radar frames to reduce processing time from 47s to <2s.
+Perfect for capstone projects without external dependencies.
 """
-import pickle
 import hashlib
 import logging
 import numpy as np
-from typing import Optional, Any, Dict, List
+from typing import Optional, Any, Dict, List, Tuple
 from datetime import datetime, timedelta
-import redis
-from redis.exceptions import ConnectionError, TimeoutError
+import threading
+import time
 
 logger = logging.getLogger(__name__)
 
 
 class RadarCacheService:
     """
-    High-performance Redis cache for processed radar data.
+    High-performance in-memory cache for processed radar data.
     
     Features:
     - Intelligent cache keys based on file content and processing parameters
     - TTL-based expiration (30 minutes for radar frames)
-    - Compression for large numpy arrays
+    - Thread-safe operations
     - Cache warming for active radar sites
-    - Memory-efficient storage with binary serialization
+    - Memory-efficient storage with automatic cleanup
     """
     
     def __init__(self, 
-                 redis_host: str = "localhost",
-                 redis_port: int = 6379,
-                 redis_db: int = 0,
                  default_ttl: int = 1800,  # 30 minutes
-                 compression: bool = True):
+                 max_cache_size: int = 1000):  # Maximum number of cached items
         """
-        Initialize radar cache service.
+        Initialize in-memory radar cache service.
         
         Args:
-            redis_host: Redis server hostname
-            redis_port: Redis server port
-            redis_db: Redis database number
             default_ttl: Default time-to-live in seconds
-            compression: Enable data compression
+            max_cache_size: Maximum number of items to cache
         """
-        self.redis_host = redis_host
-        self.redis_port = redis_port
-        self.redis_db = redis_db
         self.default_ttl = default_ttl
-        self.compression = compression
-        self.redis_client = None
-        self._connection_healthy = False
+        self.max_cache_size = max_cache_size
+        self._connection_healthy = True
+        
+        # In-memory storage
+        self._frame_cache: Dict[str, Tuple[np.ndarray, float]] = {}  # key -> (data, expiry_time)
+        self._sequence_cache: Dict[str, Tuple[Tuple[np.ndarray, Dict], float]] = {}
+        self._stats: Dict[str, int] = {
+            "frames_cached": 0,
+            "frames_retrieved": 0,
+            "sequences_cached": 0,
+            "sequences_retrieved": 0,
+            "cache_hits": 0,
+            "cache_misses": 0
+        }
+        
+        # Thread safety
+        self._lock = threading.RLock()
         
         # Cache key prefixes
         self.FRAME_PREFIX = "radar:frame:"
         self.SEQUENCE_PREFIX = "radar:sequence:"
-        self.METADATA_PREFIX = "radar:meta:"
-        self.STATS_PREFIX = "radar:stats:"
         
-        self._connect()
-        
-    def _connect(self) -> bool:
-        """
-        Establish Redis connection with error handling.
-        
-        Returns:
-            bool: True if connection successful
-        """
-        try:
-            self.redis_client = redis.Redis(
-                host=self.redis_host,
-                port=self.redis_port,
-                db=self.redis_db,
-                decode_responses=False,  # Keep binary for numpy arrays
-                socket_connect_timeout=5,
-                socket_timeout=5,
-                retry_on_timeout=True,
-                health_check_interval=30
-            )
-            
-            # Test connection
-            self.redis_client.ping()
-            self._connection_healthy = True
-            logger.info(f"Connected to Redis at {self.redis_host}:{self.redis_port}")
-            return True
-            
-        except (ConnectionError, TimeoutError) as e:
-            logger.warning(f"Redis connection failed: {e}. Cache will be disabled.")
-            self._connection_healthy = False
-            return False
-        except Exception as e:
-            logger.error(f"Unexpected Redis error: {e}")
-            self._connection_healthy = False
-            return False
+        logger.info(f"In-memory RadarCacheService initialized (TTL: {default_ttl}s, max_size: {max_cache_size})")
     
     def _generate_cache_key(self, 
                           key_type: str, 
@@ -118,8 +87,10 @@ class RadarCacheService:
         # Generate file content hash for identifier if it's a file path
         if identifier.startswith('/') and '.' in identifier:
             try:
-                with open(identifier, 'rb') as f:
-                    file_hash = hashlib.md5(f.read()).hexdigest()[:12]
+                # Use file size and modification time for faster hashing
+                import os
+                stat = os.stat(identifier)
+                file_hash = hashlib.md5(f"{stat.st_size}:{stat.st_mtime}".encode()).hexdigest()[:12]
                 identifier = file_hash
             except (FileNotFoundError, PermissionError):
                 # Fallback to filename if file not accessible
@@ -127,39 +98,58 @@ class RadarCacheService:
         
         return f"{key_type}{site_id}:{identifier}{param_hash}"
     
-    def _serialize_data(self, data: Any) -> bytes:
-        """
-        Serialize data with optional compression.
+    def _cleanup_expired(self):
+        """Remove expired cache entries."""
+        current_time = time.time()
         
-        Args:
-            data: Data to serialize
-            
-        Returns:
-            bytes: Serialized data
-        """
-        if isinstance(data, np.ndarray):
-            # Efficient numpy serialization
-            if self.compression:
-                # Use pickle with highest compression
-                serialized = pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
-            else:
-                serialized = pickle.dumps(data)
-        else:
-            serialized = pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
+        # Cleanup frame cache
+        expired_frame_keys = [
+            key for key, (_, expiry) in self._frame_cache.items() 
+            if current_time > expiry
+        ]
+        for key in expired_frame_keys:
+            del self._frame_cache[key]
         
-        return serialized
+        # Cleanup sequence cache
+        expired_seq_keys = [
+            key for key, (_, expiry) in self._sequence_cache.items() 
+            if current_time > expiry
+        ]
+        for key in expired_seq_keys:
+            del self._sequence_cache[key]
+        
+        if expired_frame_keys or expired_seq_keys:
+            logger.debug(f"Cleaned up {len(expired_frame_keys)} frame entries and {len(expired_seq_keys)} sequence entries")
     
-    def _deserialize_data(self, data: bytes) -> Any:
-        """
-        Deserialize data.
+    def _enforce_cache_size_limit(self):
+        """Enforce maximum cache size by removing oldest entries."""
+        total_entries = len(self._frame_cache) + len(self._sequence_cache)
         
-        Args:
-            data: Serialized data
-            
-        Returns:
-            Any: Deserialized data
-        """
-        return pickle.loads(data)
+        if total_entries <= self.max_cache_size:
+            return
+        
+        # Get all entries with their expiry times
+        all_entries = []
+        for key, (_, expiry) in self._frame_cache.items():
+            all_entries.append((expiry, 'frame', key))
+        for key, (_, expiry) in self._sequence_cache.items():
+            all_entries.append((expiry, 'sequence', key))
+        
+        # Sort by expiry time (oldest first)
+        all_entries.sort()
+        
+        # Remove oldest entries until we're under the limit
+        entries_to_remove = total_entries - self.max_cache_size
+        for i in range(entries_to_remove):
+            if i >= len(all_entries):
+                break
+            _, cache_type, key = all_entries[i]
+            if cache_type == 'frame':
+                del self._frame_cache[key]
+            else:
+                del self._sequence_cache[key]
+        
+        logger.debug(f"Removed {entries_to_remove} old cache entries to enforce size limit")
     
     def cache_radar_frame(self, 
                          site_id: str, 
@@ -182,25 +172,29 @@ class RadarCacheService:
             return False
         
         try:
-            cache_key = self._generate_cache_key(
-                self.FRAME_PREFIX, 
-                site_id, 
-                file_path,
-                shape=processed_frame.shape,
-                dtype=str(processed_frame.dtype)
-            )
-            
-            serialized_data = self._serialize_data(processed_frame)
-            ttl = ttl or self.default_ttl
-            
-            result = self.redis_client.setex(cache_key, ttl, serialized_data)
-            
-            if result:
+            with self._lock:
+                cache_key = self._generate_cache_key(
+                    self.FRAME_PREFIX, 
+                    site_id, 
+                    file_path,
+                    shape=processed_frame.shape,
+                    dtype=str(processed_frame.dtype)
+                )
+                
+                ttl = ttl or self.default_ttl
+                expiry_time = time.time() + ttl
+                
+                self._frame_cache[cache_key] = (processed_frame.copy(), expiry_time)
+                self._stats["frames_cached"] += 1
+                
+                # Periodic cleanup
+                if len(self._frame_cache) % 100 == 0:
+                    self._cleanup_expired()
+                    self._enforce_cache_size_limit()
+                
                 logger.debug(f"Cached radar frame: {cache_key}")
-                self._update_cache_stats("frames_cached", 1)
                 return True
-            return False
-            
+                
         except Exception as e:
             logger.warning(f"Failed to cache radar frame: {e}")
             return False
@@ -226,22 +220,28 @@ class RadarCacheService:
             return None
         
         try:
-            cache_key = self._generate_cache_key(
-                self.FRAME_PREFIX, 
-                site_id, 
-                file_path,
-                shape=expected_shape,
-                dtype=expected_dtype
-            )
-            
-            cached_data = self.redis_client.get(cache_key)
-            if cached_data is None:
-                return None
-            
-            frame = self._deserialize_data(cached_data)
-            
-            # Validate retrieved data
-            if isinstance(frame, np.ndarray):
+            with self._lock:
+                cache_key = self._generate_cache_key(
+                    self.FRAME_PREFIX, 
+                    site_id, 
+                    file_path,
+                    shape=expected_shape,
+                    dtype=expected_dtype
+                )
+                
+                if cache_key not in self._frame_cache:
+                    self._stats["cache_misses"] += 1
+                    return None
+                
+                frame, expiry_time = self._frame_cache[cache_key]
+                
+                # Check if expired
+                if time.time() > expiry_time:
+                    del self._frame_cache[cache_key]
+                    self._stats["cache_misses"] += 1
+                    return None
+                
+                # Validate retrieved data
                 if expected_shape and frame.shape != expected_shape:
                     logger.warning(f"Cached frame shape mismatch: {frame.shape} vs {expected_shape}")
                     return None
@@ -250,12 +250,11 @@ class RadarCacheService:
                     logger.warning(f"Cached frame dtype mismatch: {frame.dtype} vs {expected_dtype}")
                     return None
                 
+                self._stats["frames_retrieved"] += 1
+                self._stats["cache_hits"] += 1
                 logger.debug(f"Retrieved cached radar frame: {cache_key}")
-                self._update_cache_stats("frames_retrieved", 1)
-                return frame
-            
-            return None
-            
+                return frame.copy()
+                
         except Exception as e:
             logger.warning(f"Failed to retrieve radar frame: {e}")
             return None
@@ -283,36 +282,35 @@ class RadarCacheService:
             return False
         
         try:
-            # Create sequence identifier from file paths
-            sequence_id = hashlib.md5("|".join(sorted(file_paths)).encode()).hexdigest()[:16]
-            
-            cache_key = self._generate_cache_key(
-                self.SEQUENCE_PREFIX, 
-                site_id, 
-                sequence_id,
-                length=len(file_paths),
-                shape=processed_sequence.shape
-            )
-            
-            # Cache both sequence and metadata
-            cache_data = {
-                'sequence': processed_sequence,
-                'metadata': metadata,
-                'file_paths': file_paths,
-                'cached_at': datetime.utcnow().isoformat()
-            }
-            
-            serialized_data = self._serialize_data(cache_data)
-            ttl = ttl or self.default_ttl
-            
-            result = self.redis_client.setex(cache_key, ttl, serialized_data)
-            
-            if result:
+            with self._lock:
+                # Create sequence identifier from file paths
+                sequence_id = hashlib.md5("|".join(sorted(file_paths)).encode()).hexdigest()[:16]
+                
+                cache_key = self._generate_cache_key(
+                    self.SEQUENCE_PREFIX, 
+                    site_id, 
+                    sequence_id,
+                    length=len(file_paths),
+                    shape=processed_sequence.shape
+                )
+                
+                # Cache both sequence and metadata
+                cache_data = (processed_sequence.copy(), metadata.copy())
+                
+                ttl = ttl or self.default_ttl
+                expiry_time = time.time() + ttl
+                
+                self._sequence_cache[cache_key] = (cache_data, expiry_time)
+                self._stats["sequences_cached"] += 1
+                
+                # Periodic cleanup
+                if len(self._sequence_cache) % 50 == 0:
+                    self._cleanup_expired()
+                    self._enforce_cache_size_limit()
+                
                 logger.debug(f"Cached radar sequence: {cache_key}")
-                self._update_cache_stats("sequences_cached", 1)
                 return True
-            return False
-            
+                
         except Exception as e:
             logger.warning(f"Failed to cache radar sequence: {e}")
             return False
@@ -334,28 +332,34 @@ class RadarCacheService:
             return None
         
         try:
-            sequence_id = hashlib.md5("|".join(sorted(file_paths)).encode()).hexdigest()[:16]
-            
-            cache_key = self._generate_cache_key(
-                self.SEQUENCE_PREFIX, 
-                site_id, 
-                sequence_id,
-                length=len(file_paths)
-            )
-            
-            cached_data = self.redis_client.get(cache_key)
-            if cached_data is None:
-                return None
-            
-            cache_obj = self._deserialize_data(cached_data)
-            
-            if isinstance(cache_obj, dict) and 'sequence' in cache_obj:
+            with self._lock:
+                sequence_id = hashlib.md5("|".join(sorted(file_paths)).encode()).hexdigest()[:16]
+                
+                cache_key = self._generate_cache_key(
+                    self.SEQUENCE_PREFIX, 
+                    site_id, 
+                    sequence_id,
+                    length=len(file_paths)
+                )
+                
+                if cache_key not in self._sequence_cache:
+                    self._stats["cache_misses"] += 1
+                    return None
+                
+                cache_data, expiry_time = self._sequence_cache[cache_key]
+                
+                # Check if expired
+                if time.time() > expiry_time:
+                    del self._sequence_cache[cache_key]
+                    self._stats["cache_misses"] += 1
+                    return None
+                
+                self._stats["sequences_retrieved"] += 1
+                self._stats["cache_hits"] += 1
                 logger.debug(f"Retrieved cached radar sequence: {cache_key}")
-                self._update_cache_stats("sequences_retrieved", 1)
-                return cache_obj['sequence'], cache_obj['metadata']
-            
-            return None
-            
+                
+                return cache_data
+                
         except Exception as e:
             logger.warning(f"Failed to retrieve radar sequence: {e}")
             return None
@@ -384,7 +388,7 @@ class RadarCacheService:
         
         # Import here to avoid circular imports
         from .radar_processing_service import RadarProcessingService
-        processor = RadarProcessingService()
+        processor = RadarProcessingService(enable_cache=False)  # Avoid recursion
         
         for file_path in recent_files[:20]:  # Limit to most recent 20 files
             try:
@@ -395,7 +399,7 @@ class RadarCacheService:
                     continue
                 
                 # Process and cache frame
-                processed_frame = processor.process_nexrad_file(file_path)
+                processed_frame = processor._process_file_uncached(file_path)
                 if processed_frame is not None:
                     if self.cache_radar_frame(site_id, file_path, processed_frame):
                         stats["frames_cached"] += 1
@@ -414,18 +418,6 @@ class RadarCacheService:
         
         return stats
     
-    def _update_cache_stats(self, metric: str, value: int) -> None:
-        """Update cache statistics."""
-        if not self._connection_healthy:
-            return
-        
-        try:
-            key = f"{self.STATS_PREFIX}{metric}"
-            self.redis_client.incrby(key, value)
-            self.redis_client.expire(key, 3600)  # 1 hour TTL for stats
-        except Exception:
-            pass  # Don't fail operations due to stats issues
-    
     def get_cache_stats(self) -> Dict[str, Any]:
         """
         Get cache performance statistics.
@@ -433,78 +425,46 @@ class RadarCacheService:
         Returns:
             dict: Cache statistics
         """
-        stats = {
-            "connection_healthy": self._connection_healthy,
-            "redis_info": {},
-            "cache_metrics": {}
-        }
-        
-        if not self._connection_healthy:
-            return stats
-        
-        try:
-            # Get Redis info
-            redis_info = self.redis_client.info()
-            stats["redis_info"] = {
-                "used_memory_human": redis_info.get("used_memory_human", "unknown"),
-                "connected_clients": redis_info.get("connected_clients", 0),
-                "keyspace_hits": redis_info.get("keyspace_hits", 0),
-                "keyspace_misses": redis_info.get("keyspace_misses", 0)
+        with self._lock:
+            total_requests = self._stats["cache_hits"] + self._stats["cache_misses"]
+            hit_ratio = self._stats["cache_hits"] / total_requests if total_requests > 0 else 0.0
+            
+            return {
+                "connection_healthy": self._connection_healthy,
+                "cache_type": "in_memory",
+                "cache_metrics": self._stats.copy(),
+                "hit_ratio": hit_ratio,
+                "frame_cache_size": len(self._frame_cache),
+                "sequence_cache_size": len(self._sequence_cache),
+                "total_cache_entries": len(self._frame_cache) + len(self._sequence_cache),
+                "max_cache_size": self.max_cache_size,
+                "default_ttl_seconds": self.default_ttl
             }
-            
-            # Get custom metrics
-            metric_keys = [
-                "frames_cached", "frames_retrieved", 
-                "sequences_cached", "sequences_retrieved"
-            ]
-            
-            for metric in metric_keys:
-                key = f"{self.STATS_PREFIX}{metric}"
-                value = self.redis_client.get(key)
-                stats["cache_metrics"][metric] = int(value) if value else 0
-            
-            # Calculate hit ratio
-            total_requests = sum(stats["cache_metrics"].get(k, 0) 
-                               for k in ["frames_retrieved", "sequences_retrieved"])
-            total_cached = sum(stats["cache_metrics"].get(k, 0) 
-                             for k in ["frames_cached", "sequences_cached"])
-            
-            if total_requests > 0:
-                stats["hit_ratio"] = total_requests / (total_requests + total_cached)
-            else:
-                stats["hit_ratio"] = 0.0
-            
-        except Exception as e:
-            logger.warning(f"Failed to get cache stats: {e}")
-        
-        return stats
     
     def clear_cache(self, pattern: str = None) -> int:
         """
         Clear cache entries matching pattern.
         
         Args:
-            pattern: Redis key pattern (default: all radar cache)
+            pattern: Key pattern (not used in simple implementation)
             
         Returns:
             int: Number of keys deleted
         """
-        if not self._connection_healthy:
-            return 0
-        
-        pattern = pattern or "radar:*"
-        
-        try:
-            keys = self.redis_client.keys(pattern)
-            if keys:
-                deleted = self.redis_client.delete(*keys)
-                logger.info(f"Cleared {deleted} cache entries matching pattern: {pattern}")
-                return deleted
-            return 0
+        with self._lock:
+            frame_count = len(self._frame_cache)
+            sequence_count = len(self._sequence_cache)
             
-        except Exception as e:
-            logger.error(f"Failed to clear cache: {e}")
-            return 0
+            self._frame_cache.clear()
+            self._sequence_cache.clear()
+            
+            # Reset stats
+            for key in self._stats:
+                self._stats[key] = 0
+            
+            total_cleared = frame_count + sequence_count
+            logger.info(f"Cleared {total_cleared} cache entries")
+            return total_cleared
     
     def health_check(self) -> Dict[str, Any]:
         """
@@ -513,42 +473,15 @@ class RadarCacheService:
         Returns:
             dict: Health check results
         """
-        health = {
+        return {
             "service": "RadarCacheService",
-            "status": "unknown",
-            "connection_healthy": False,
+            "status": "healthy",
+            "connection_healthy": True,
+            "cache_type": "in_memory",
             "last_check": datetime.utcnow().isoformat(),
-            "details": {}
+            "total_entries": len(self._frame_cache) + len(self._sequence_cache),
+            "max_capacity": self.max_cache_size
         }
-        
-        try:
-            if self.redis_client:
-                # Test basic operations
-                test_key = "health_check_test"
-                test_value = "test_data"
-                
-                # Set and get test
-                self.redis_client.setex(test_key, 10, test_value)
-                retrieved = self.redis_client.get(test_key)
-                self.redis_client.delete(test_key)
-                
-                if retrieved and retrieved.decode() == test_value:
-                    health["status"] = "healthy"
-                    health["connection_healthy"] = True
-                    self._connection_healthy = True
-                else:
-                    health["status"] = "degraded"
-                    health["details"]["error"] = "Test operation failed"
-            else:
-                health["status"] = "disconnected"
-                health["details"]["error"] = "No Redis connection"
-                
-        except Exception as e:
-            health["status"] = "unhealthy"
-            health["details"]["error"] = str(e)
-            self._connection_healthy = False
-        
-        return health
 
 
 # Global cache instance

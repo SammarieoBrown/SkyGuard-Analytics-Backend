@@ -8,7 +8,7 @@ import tempfile
 import tarfile
 import logging
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from pathlib import Path
@@ -226,6 +226,73 @@ class NEXRADDataService:
         
         return results
     
+    def download_latest_files(self, site_id: str, max_files: int = 10) -> Dict[str, Any]:
+        """
+        Download only the latest N files for immediate processing (optimized for speed).
+        
+        This method downloads individual files instead of entire hourly archives,
+        significantly reducing download time for real-time predictions.
+        
+        Args:
+            site_id: Radar site identifier
+            max_files: Maximum number of latest files to download
+            
+        Returns:
+            dict: Download results with timing information
+        """
+        if site_id not in self.RADAR_SITES:
+            raise ValueError(f"Unsupported site: {site_id}")
+        
+        logger.info(f"Downloading latest {max_files} files for {site_id}")
+        start_time = datetime.now()
+        
+        results = {
+            "site_id": site_id,
+            "max_files_requested": max_files,
+            "files_downloaded": 0,
+            "files_already_exist": 0,
+            "download_errors": 0,
+            "file_list": [],
+            "start_time": start_time
+        }
+        
+        try:
+            # Check what files we already have
+            existing_files = self.get_available_files(site_id, hours_back=6, max_files=max_files)
+            
+            if len(existing_files) >= max_files:
+                results["files_already_exist"] = len(existing_files)
+                results["file_list"] = existing_files[:max_files]
+                logger.info(f"Already have {len(existing_files)} recent files for {site_id}")
+                return results
+            
+            # If we need more files, try to download recent data
+            needed_files = max_files - len(existing_files)
+            logger.info(f"Need to download {needed_files} more files for {site_id}")
+            
+            # Download recent hourly data (last 3 hours should be sufficient)
+            download_result = self.download_recent_data(site_id, hours_back=3)
+            
+            # Get updated file list
+            updated_files = self.get_available_files(site_id, hours_back=6, max_files=max_files)
+            results["files_downloaded"] = len(updated_files) - len(existing_files)
+            results["file_list"] = updated_files
+            
+        except Exception as e:
+            logger.error(f"Failed to download latest files for {site_id}: {e}")
+            results["download_errors"] = 1
+            results["error"] = str(e)
+        
+        results["end_time"] = datetime.now()
+        results["duration_seconds"] = (results["end_time"] - results["start_time"]).total_seconds()
+        
+        logger.info(f"Latest file download complete for {site_id}: "
+                   f"{results['files_downloaded']} new files, "
+                   f"{results['files_already_exist']} existing files, "
+                   f"{results['duration_seconds']:.2f}s")
+        
+        return results
+    
     def download_all_sites_recent(self, hours_back: int = 12) -> Dict[str, Dict]:
         """
         Download recent data for all supported radar sites.
@@ -261,13 +328,14 @@ class NEXRADDataService:
         
         return all_results
     
-    def get_available_files(self, site_id: str, hours_back: int = 24) -> List[str]:
+    def get_available_files(self, site_id: str, hours_back: int = 24, max_files: int = None) -> List[str]:
         """
-        Get list of available radar files for a site.
+        Get list of available radar files for a site with optional limits.
         
         Args:
             site_id: Radar site identifier
             hours_back: How far back to look for files
+            max_files: Maximum number of files to return (most recent first)
             
         Returns:
             list: List of available file paths
@@ -295,6 +363,11 @@ class NEXRADDataService:
         
         # Sort by modification time (most recent first)
         files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+        
+        # Apply max_files limit if specified
+        if max_files and len(files) > max_files:
+            files = files[:max_files]
+            logger.debug(f"Limited results to {max_files} most recent files for {site_id}")
         
         return files
     

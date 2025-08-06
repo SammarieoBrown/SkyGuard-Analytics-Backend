@@ -25,5 +25,5 @@ requests>=2.25.0
 lxml>=4.6.0
 netCDF4>=1.5.0
 Pillow>=8.0.0
-redis>=4.5.0
-hiredis>=2.2.0 
+cartopy>=0.21.0
+pyproj>=3.4.0 
