@@ -19,6 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from metpy.io import Level2File
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import tempfile
+from app.config import USE_GCS_STORAGE, GCS_BUCKET_NAME, GCS_CREDENTIALS
 
 # Suppress warnings for production
 warnings.filterwarnings('ignore', category=UserWarning)
@@ -89,9 +91,10 @@ class RadarProcessingService:
                            use_cache: bool = True) -> Optional[np.ndarray]:
         """
         Process a single NEXRAD .ar2v file to grayscale array with intelligent caching.
+        Supports both local files and GCS blob names.
         
         Args:
-            filepath: Path to the .ar2v file
+            filepath: Path to the .ar2v file (local path or GCS blob name)
             site_id: Radar site identifier for caching (extracted from filename if not provided)
             use_cache: Enable cache lookup and storage
             
@@ -99,14 +102,31 @@ class RadarProcessingService:
             np.ndarray: Processed grayscale array (64x64) or None if processing failed
         """
         try:
-            # Validate file
-            if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
-                logger.debug(f"File not found or empty: {filepath}")
-                return None
+            # Initialize GCS service if needed
+            gcs_service = None
+            if USE_GCS_STORAGE:
+                try:
+                    from app.services.gcs_storage_service import GCSStorageService
+                    gcs_service = GCSStorageService(GCS_BUCKET_NAME, GCS_CREDENTIALS)
+                except Exception as e:
+                    logger.warning(f"Failed to initialize GCS service: {e}")
+            
+            # Check if this is a GCS blob name
+            is_gcs_file = filepath.startswith("nexrad/") and gcs_service is not None
+            
+            # Validate file existence
+            if is_gcs_file:
+                if not gcs_service.file_exists(filepath):
+                    logger.debug(f"File not found in GCS: {filepath}")
+                    return None
+            else:
+                if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
+                    logger.debug(f"File not found or empty: {filepath}")
+                    return None
             
             # Extract site_id from filename if not provided
             if site_id is None:
-                filename = os.path.basename(filepath)
+                filename = os.path.basename(filepath) if not is_gcs_file else filepath.split('/')[-1]
                 if len(filename) >= 4:
                     site_id = filename[:4].upper()
                 else:
@@ -125,7 +145,10 @@ class RadarProcessingService:
                     return cached_frame
             
             # Process file (cache miss or cache disabled)
-            processed_array = self._process_file_uncached(filepath)
+            if is_gcs_file:
+                processed_array = self._process_gcs_file(filepath, gcs_service)
+            else:
+                processed_array = self._process_file_uncached(filepath)
             
             # Cache the result if successful
             if (processed_array is not None and 
@@ -136,6 +159,36 @@ class RadarProcessingService:
             
         except Exception as e:
             logger.debug(f"Error processing {os.path.basename(filepath)}: {str(e)}")
+            return None
+    
+    def _process_gcs_file(self, blob_name: str, gcs_service) -> Optional[np.ndarray]:
+        """
+        Process a file from GCS by downloading to memory first.
+        
+        Args:
+            blob_name: GCS blob name
+            gcs_service: GCS service instance
+            
+        Returns:
+            np.ndarray: Processed array or None if processing failed
+        """
+        try:
+            # Download file from GCS to memory
+            file_data = gcs_service.download_file(blob_name)
+            if file_data is None:
+                logger.debug(f"Failed to download {blob_name} from GCS")
+                return None
+            
+            # Create a temporary file for processing
+            with tempfile.NamedTemporaryFile(suffix='.ar2v', delete=True) as tmp_file:
+                tmp_file.write(file_data)
+                tmp_file.flush()
+                
+                # Process the temporary file
+                return self._process_file_uncached(tmp_file.name)
+                
+        except Exception as e:
+            logger.debug(f"Failed to process GCS file {blob_name}: {e}")
             return None
     
     def _process_file_uncached(self, filepath: str) -> Optional[np.ndarray]:

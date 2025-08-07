@@ -1,6 +1,6 @@
 """
 NEXRAD Data Service - Clean production implementation for fetching NEXRAD Level-II data.
-Fetches real-time radar data from AWS S3 public storage.
+Fetches real-time radar data from AWS S3 public storage and stores in GCS.
 """
 import os
 import requests
@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from pathlib import Path
 import xml.etree.ElementTree as ET
+from app.config import USE_GCS_STORAGE, GCS_BUCKET_NAME, GCS_CREDENTIALS
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ class NEXRADDataService:
         Initialize NEXRAD data service.
         
         Args:
-            data_dir: Directory to store downloaded radar data
+            data_dir: Directory to store downloaded radar data (used if GCS is disabled)
             max_workers: Maximum number of concurrent download threads
         """
         self.data_dir = data_dir or self._get_default_data_dir()
@@ -52,10 +53,21 @@ class NEXRADDataService:
         self.base_url = "https://noaa-nexrad-level2.s3.amazonaws.com"
         self.lock = threading.Lock()
         
-        # Ensure data directory exists
-        os.makedirs(self.data_dir, exist_ok=True)
+        # Initialize GCS if enabled
+        self.gcs_service = None
+        if USE_GCS_STORAGE:
+            try:
+                from app.services.gcs_storage_service import GCSStorageService
+                self.gcs_service = GCSStorageService(GCS_BUCKET_NAME, GCS_CREDENTIALS)
+                logger.info(f"NEXRADDataService initialized with GCS storage (bucket: {GCS_BUCKET_NAME})")
+            except Exception as e:
+                logger.warning(f"Failed to initialize GCS, falling back to local storage: {e}")
+                self.gcs_service = None
         
-        logger.info(f"NEXRADDataService initialized with AWS S3, data_dir: {self.data_dir}")
+        # Ensure local data directory exists (for fallback or if GCS disabled)
+        if not USE_GCS_STORAGE or not self.gcs_service:
+            os.makedirs(self.data_dir, exist_ok=True)
+            logger.info(f"NEXRADDataService initialized with local storage, data_dir: {self.data_dir}")
     
     def _get_default_data_dir(self) -> str:
         """Get default data directory path."""
@@ -159,12 +171,18 @@ class NEXRADDataService:
             downloaded_files = []
             for file_key in hour_files[:6]:  # Limit to 6 files per hour (every ~10 minutes)
                 filename = os.path.basename(file_key)
-                file_path = os.path.join(site_dir, filename)
                 
-                # Skip if already exists
-                if os.path.exists(file_path):
-                    downloaded_files.append(filename)
-                    continue
+                # Check if file already exists (GCS or local)
+                if self.gcs_service:
+                    blob_name = self.gcs_service.create_nexrad_blob_name(site_id, date, filename)
+                    if self.gcs_service.file_exists(blob_name):
+                        downloaded_files.append(filename)
+                        continue
+                else:
+                    file_path = os.path.join(site_dir, filename)
+                    if os.path.exists(file_path):
+                        downloaded_files.append(filename)
+                        continue
                 
                 # Download file
                 file_url = self._build_file_url(file_key)
@@ -172,13 +190,29 @@ class NEXRADDataService:
                     response = requests.get(file_url, timeout=60, stream=True)
                     response.raise_for_status()
                     
-                    # Save file
-                    with open(file_path, 'wb') as f:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            if chunk:
-                                f.write(chunk)
+                    # Collect file data in memory
+                    file_data = b''
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            file_data += chunk
                     
-                    downloaded_files.append(filename)
+                    # Save to GCS or local
+                    if self.gcs_service:
+                        blob_name = self.gcs_service.create_nexrad_blob_name(site_id, date, filename)
+                        metadata = {
+                            'site_id': site_id,
+                            'date': date.strftime('%Y-%m-%d'),
+                            'hour': str(hour),
+                            'source': 'AWS_S3'
+                        }
+                        if self.gcs_service.upload_file(file_data, blob_name, metadata):
+                            downloaded_files.append(filename)
+                    else:
+                        # Fallback to local storage
+                        file_path = os.path.join(site_dir, filename)
+                        with open(file_path, 'wb') as f:
+                            f.write(file_data)
+                        downloaded_files.append(filename)
                     
                 except Exception as e:
                     logger.debug(f"Failed to download {filename}: {e}")
@@ -419,32 +453,46 @@ class NEXRADDataService:
             max_files: Maximum number of files to return (most recent first)
             
         Returns:
-            list: List of available file paths
+            list: List of available file paths (or blob names if using GCS)
         """
         if site_id not in self.RADAR_SITES:
             raise ValueError(f"Unsupported site: {site_id}")
         
         files = []
         
-        # Look through recent dates
-        end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=hours_back // 24 + 1)
-        
-        current_date = start_date
-        while current_date <= end_date:
-            date_dir = os.path.join(self.data_dir, site_id, current_date.strftime('%Y-%m-%d'))
+        if self.gcs_service:
+            # Get files from GCS
+            prefix = f"nexrad/{site_id}/"
+            gcs_files = self.gcs_service.list_files(prefix)
             
-            if os.path.exists(date_dir):
-                for filename in os.listdir(date_dir):
-                    # AWS S3 files end with _V06 or _V06.gz
-                    if filename.endswith('_V06') or filename.endswith('_V06.gz') or filename.endswith('.ar2v'):
-                        file_path = os.path.join(date_dir, filename)
-                        files.append(file_path)
+            # Filter by time if needed
+            cutoff_time = datetime.now() - timedelta(hours=hours_back)
+            for file_info in gcs_files:
+                if file_info['created'] and file_info['created'] >= cutoff_time:
+                    files.append(file_info['name'])
             
-            current_date += timedelta(days=1)
-        
-        # Sort by modification time (most recent first)
-        files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+            # Sort by creation time (most recent first)
+            files.sort(reverse=True)
+        else:
+            # Fallback to local storage
+            end_date = datetime.now().date()
+            start_date = end_date - timedelta(days=hours_back // 24 + 1)
+            
+            current_date = start_date
+            while current_date <= end_date:
+                date_dir = os.path.join(self.data_dir, site_id, current_date.strftime('%Y-%m-%d'))
+                
+                if os.path.exists(date_dir):
+                    for filename in os.listdir(date_dir):
+                        # AWS S3 files end with _V06 or _V06.gz
+                        if filename.endswith('_V06') or filename.endswith('_V06.gz') or filename.endswith('.ar2v'):
+                            file_path = os.path.join(date_dir, filename)
+                            files.append(file_path)
+                
+                current_date += timedelta(days=1)
+            
+            # Sort by modification time (most recent first)
+            files.sort(key=lambda x: os.path.getmtime(x) if os.path.exists(x) else 0, reverse=True)
         
         # Apply max_files limit if specified
         if max_files and len(files) > max_files:

@@ -64,4 +64,10 @@ RADAR_SEQUENCE_LENGTH = 10  # Input sequence length for model
 RADAR_PREDICTION_LENGTH = 6  # Output prediction length
 
 # API settings
-API_V1_STR = os.getenv("API_V1_STR", "/api/v1") 
+API_V1_STR = os.getenv("API_V1_STR", "/api/v1")
+
+# GCS Configuration
+GCS_BUCKET_NAME = "skyguard-capstone"  # Hardcoded bucket name
+GCS_CREDENTIALS = os.getenv("GCP_STORAGE")  # JSON string with service account credentials
+USE_GCS_STORAGE = True  # Hardcoded to always use GCS
+GCS_DATA_RETENTION_DAYS = 7  # Hardcoded retention period 
