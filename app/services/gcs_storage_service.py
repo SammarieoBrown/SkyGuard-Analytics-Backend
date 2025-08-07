@@ -182,7 +182,9 @@ class GCSStorageService:
             int: Number of files deleted
         """
         try:
-            cutoff_date = datetime.now() - timedelta(days=days_old)
+            from datetime import timezone
+            # Use timezone-aware datetime for comparison with GCS timestamps
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_old)
             blobs = self.bucket.list_blobs(prefix=prefix)
             
             deleted_count = 0

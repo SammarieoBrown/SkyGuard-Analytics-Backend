@@ -466,7 +466,9 @@ class NEXRADDataService:
             gcs_files = self.gcs_service.list_files(prefix)
             
             # Filter by time if needed
-            cutoff_time = datetime.now() - timedelta(hours=hours_back)
+            from datetime import timezone
+            # Use timezone-aware datetime for comparison with GCS timestamps
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours_back)
             for file_info in gcs_files:
                 if file_info['created'] and file_info['created'] >= cutoff_time:
                     files.append(file_info['name'])
