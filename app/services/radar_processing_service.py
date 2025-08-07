@@ -20,7 +20,7 @@ from pathlib import Path
 from metpy.io import Level2File
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import tempfile
-from app.config import USE_GCS_STORAGE, GCS_BUCKET_NAME, GCS_CREDENTIALS
+from app.config import USE_GCS_STORAGE, GCS_BUCKET_NAME, GCS_CREDENTIALS, TEMP_DIR
 
 # Suppress warnings for production
 warnings.filterwarnings('ignore', category=UserWarning)
@@ -56,6 +56,16 @@ class RadarProcessingService:
         self.enable_cache = enable_cache
         self.max_workers = max_workers
         self.cache_service = None
+        
+        # Initialize GCS service singleton
+        self.gcs_service = None
+        if USE_GCS_STORAGE:
+            from app.services.gcs_singleton import get_gcs_service
+            self.gcs_service = get_gcs_service()
+        
+        # Initialize disk cache (for Render persistent disk)
+        from app.services.disk_cache_service import get_disk_cache
+        self.disk_cache = get_disk_cache()
         
         # Initialize cache service if enabled
         if self.enable_cache:
@@ -102,21 +112,12 @@ class RadarProcessingService:
             np.ndarray: Processed grayscale array (64x64) or None if processing failed
         """
         try:
-            # Initialize GCS service if needed
-            gcs_service = None
-            if USE_GCS_STORAGE:
-                try:
-                    from app.services.gcs_storage_service import GCSStorageService
-                    gcs_service = GCSStorageService(GCS_BUCKET_NAME, GCS_CREDENTIALS)
-                except Exception as e:
-                    logger.warning(f"Failed to initialize GCS service: {e}")
-            
             # Check if this is a GCS blob name
-            is_gcs_file = filepath.startswith("nexrad/") and gcs_service is not None
+            is_gcs_file = filepath.startswith("nexrad/") and self.gcs_service is not None
             
             # Validate file existence
             if is_gcs_file:
-                if not gcs_service.file_exists(filepath):
+                if not self.gcs_service.file_exists(filepath):
                     logger.debug(f"File not found in GCS: {filepath}")
                     return None
             else:
@@ -132,7 +133,14 @@ class RadarProcessingService:
                 else:
                     site_id = "UNKNOWN"
             
-            # Check cache first if enabled
+            # Check disk cache first (fastest)
+            if self.disk_cache.enabled:
+                cached_frame = self.disk_cache.get_cached_frame(site_id, filepath)
+                if cached_frame is not None:
+                    logger.debug(f"Disk cache hit for {os.path.basename(filepath)}")
+                    return cached_frame
+            
+            # Check Redis cache if enabled
             if use_cache and self.enable_cache and self.cache_service:
                 cached_frame = self.cache_service.get_radar_frame(
                     site_id, 
@@ -146,14 +154,19 @@ class RadarProcessingService:
             
             # Process file (cache miss or cache disabled)
             if is_gcs_file:
-                processed_array = self._process_gcs_file(filepath, gcs_service)
+                processed_array = self._process_gcs_file(filepath, self.gcs_service)
             else:
                 processed_array = self._process_file_uncached(filepath)
             
             # Cache the result if successful
-            if (processed_array is not None and 
-                use_cache and self.enable_cache and self.cache_service):
-                self.cache_service.cache_radar_frame(site_id, filepath, processed_array)
+            if processed_array is not None:
+                # Save to disk cache (fastest)
+                if self.disk_cache.enabled:
+                    self.disk_cache.cache_frame(site_id, filepath, processed_array)
+                
+                # Save to Redis cache
+                if use_cache and self.enable_cache and self.cache_service:
+                    self.cache_service.cache_radar_frame(site_id, filepath, processed_array)
             
             return processed_array
             
@@ -180,7 +193,12 @@ class RadarProcessingService:
                 return None
             
             # Create a temporary file for processing
-            with tempfile.NamedTemporaryFile(suffix='.ar2v', delete=True) as tmp_file:
+            # Use persistent disk temp dir on Render
+            temp_kwargs = {'suffix': '.ar2v', 'delete': True}
+            if TEMP_DIR:
+                temp_kwargs['dir'] = str(TEMP_DIR)
+            
+            with tempfile.NamedTemporaryFile(**temp_kwargs) as tmp_file:
                 tmp_file.write(file_data)
                 tmp_file.flush()
                 

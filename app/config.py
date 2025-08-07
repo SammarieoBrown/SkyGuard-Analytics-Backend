@@ -9,6 +9,10 @@ load_dotenv()
 # Base directories
 BASE_DIR = Path(__file__).parent.parent
 
+# Render Detection
+IS_RENDER = os.getenv("RENDER") is not None
+RENDER_PERSISTENT_DISK = "/data" if IS_RENDER else None
+
 # Database Configuration
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 
@@ -51,7 +55,20 @@ WEATHER_NOWCASTING_MODEL_PATH = WEATHER_NOWCASTING_MODEL_DIR / "best_model.keras
 WEATHER_NOWCASTING_CONFIG_PATH = WEATHER_NOWCASTING_MODEL_DIR / "model_config.json"
 
 # NEXRAD Data Configuration
-NEXRAD_DATA_DIR = BASE_DIR / "app" / "data" / "radar"
+if IS_RENDER and RENDER_PERSISTENT_DISK:
+    # Use persistent disk on Render (mounted at /data)
+    NEXRAD_DATA_DIR = Path(RENDER_PERSISTENT_DISK) / "radar"
+    CACHE_DIR = Path(RENDER_PERSISTENT_DISK) / "cache"
+    TEMP_DIR = Path(RENDER_PERSISTENT_DISK) / "tmp"
+    # Ensure directories exist
+    for dir_path in [NEXRAD_DATA_DIR, CACHE_DIR, TEMP_DIR]:
+        dir_path.mkdir(parents=True, exist_ok=True)
+else:
+    # Use local directories for development
+    NEXRAD_DATA_DIR = BASE_DIR / "app" / "data" / "radar"
+    CACHE_DIR = BASE_DIR / "app" / "cache"
+    TEMP_DIR = None  # Use system default
+
 NEXRAD_GCP_BASE_URL = "https://storage.googleapis.com/gcp-public-data-nexrad-l2"
 NEXRAD_SUPPORTED_SITES = ["KAMX", "KATX"]  # Miami and Seattle
 NEXRAD_DATA_RETENTION_DAYS = int(os.getenv("NEXRAD_DATA_RETENTION_DAYS", "7"))

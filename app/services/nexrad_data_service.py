@@ -53,15 +53,18 @@ class NEXRADDataService:
         self.base_url = "https://noaa-nexrad-level2.s3.amazonaws.com"
         self.lock = threading.Lock()
         
-        # Initialize GCS if enabled
+        # Initialize GCS if enabled (using singleton)
         self.gcs_service = None
         if USE_GCS_STORAGE:
             try:
-                from app.services.gcs_storage_service import GCSStorageService
-                self.gcs_service = GCSStorageService(GCS_BUCKET_NAME, GCS_CREDENTIALS)
-                logger.info(f"NEXRADDataService initialized with GCS storage (bucket: {GCS_BUCKET_NAME})")
+                from app.services.gcs_singleton import get_gcs_service
+                self.gcs_service = get_gcs_service()
+                if self.gcs_service:
+                    logger.info(f"NEXRADDataService using GCS storage (bucket: {GCS_BUCKET_NAME})")
+                else:
+                    logger.warning("GCS service singleton not available, falling back to local storage")
             except Exception as e:
-                logger.warning(f"Failed to initialize GCS, falling back to local storage: {e}")
+                logger.warning(f"Failed to get GCS service, falling back to local storage: {e}")
                 self.gcs_service = None
         
         # Ensure local data directory exists (for fallback or if GCS disabled)
