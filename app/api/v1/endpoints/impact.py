@@ -13,10 +13,16 @@ from app.core.services.impact_service import ImpactForecastingService
 
 router = APIRouter()
 
+# Create a singleton instance of the service
+# This ensures we reuse the same service instance with preloaded models
+_impact_service_instance = None
 
 def get_impact_service():
-    """Dependency to get the impact forecasting service."""
-    return ImpactForecastingService()
+    """Dependency to get the impact forecasting service (singleton pattern)."""
+    global _impact_service_instance
+    if _impact_service_instance is None:
+        _impact_service_instance = ImpactForecastingService()
+    return _impact_service_instance
 
 
 @router.post("/property-damage", response_model=PropertyDamagePredictionResponse)

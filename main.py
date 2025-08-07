@@ -8,6 +8,7 @@ import json
 from app.api.v1.router import api_router
 from app.config import API_V1_STR
 from app.utils import NumpyEncoder
+from app.core.models.model_manager import model_manager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -68,8 +69,48 @@ app.add_middleware(
 app.include_router(api_router, prefix=API_V1_STR)
 
 
+@app.on_event("startup")
+async def startup_event():
+    """
+    Preload all models at startup to avoid timeout issues on first request.
+    This ensures models are loaded into memory before serving any requests.
+    """
+    logger.info("Starting application - preloading models...")
+    
+    try:
+        # Preload property damage model
+        logger.info("Loading property damage model...")
+        property_damage_model = model_manager.get_property_damage_model()
+        logger.info("✅ Property damage model loaded successfully")
+        
+        # Preload casualty risk model
+        logger.info("Loading casualty risk model...")
+        casualty_risk_model = model_manager.get_casualty_risk_model()
+        logger.info("✅ Casualty risk model loaded successfully")
+        
+        # Preload severity model
+        logger.info("Loading severity model...")
+        severity_model = model_manager.get_severity_model()
+        logger.info("✅ Severity model loaded successfully")
+        
+        # Preload weather nowcasting model
+        logger.info("Loading weather nowcasting model...")
+        nowcasting_model = model_manager.get_weather_nowcasting_model()
+        logger.info("✅ Weather nowcasting model loaded successfully")
+        
+        # Get model status
+        model_status = model_manager.get_model_health_status()
+        logger.info(f"All models loaded. Status: {model_status}")
+        
+    except Exception as e:
+        logger.error(f"Failed to preload models at startup: {str(e)}")
+        logger.warning("Application starting with models loading on-demand. First requests may be slow.")
+    
+    logger.info("Application startup complete")
+
+
 @app.get("/")
-async def root():
+async def root()
     """Root endpoint with API information."""
     return {
         "name": "SkyGuard Analytics API",

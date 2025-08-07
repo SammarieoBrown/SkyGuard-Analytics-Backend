@@ -14,9 +14,12 @@ class ImpactForecastingService:
     
     def __init__(self):
         """Initialize service with required models from model manager."""
+        # Use the singleton model_manager to get already-loaded models
+        # This avoids reloading models on every request
         self.property_damage_model = model_manager.get_property_damage_model()
         self.casualty_risk_model = model_manager.get_casualty_risk_model()
         self.severity_model = model_manager.get_severity_model()
+        logger.info("ImpactForecastingService initialized with preloaded models")
     
     def predict_property_damage(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
