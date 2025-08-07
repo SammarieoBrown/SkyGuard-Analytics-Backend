@@ -110,7 +110,7 @@ async def startup_event():
 
 
 @app.get("/")
-async def root()
+async def root():
     """Root endpoint with API information."""
     return {
         "name": "SkyGuard Analytics API",
