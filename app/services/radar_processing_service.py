@@ -20,7 +20,11 @@ from pathlib import Path
 from metpy.io import Level2File
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import tempfile
-from app.config import USE_GCS_STORAGE, GCS_BUCKET_NAME, GCS_CREDENTIALS, TEMP_DIR
+import gc  # For garbage collection
+from app.config import (
+    USE_GCS_STORAGE, GCS_BUCKET_NAME, GCS_CREDENTIALS, TEMP_DIR,
+    RADAR_MAX_WORKERS, ENABLE_MEMORY_CLEANUP, IS_RENDER
+)
 
 # Suppress warnings for production
 warnings.filterwarnings('ignore', category=UserWarning)
@@ -42,7 +46,7 @@ class RadarProcessingService:
     def __init__(self, 
                  output_size: Tuple[int, int] = (64, 64),
                  enable_cache: bool = True,
-                 max_workers: int = 4):
+                 max_workers: int = None):
         """
         Initialize radar processing service.
         
@@ -54,8 +58,10 @@ class RadarProcessingService:
         self.output_size = output_size
         self.range_limit_km = 150  # 150km radar range
         self.enable_cache = enable_cache
-        self.max_workers = max_workers
+        # Use configuration-based max_workers (1 on Render, 4 locally)
+        self.max_workers = max_workers if max_workers is not None else RADAR_MAX_WORKERS
         self.cache_service = None
+        self.enable_memory_cleanup = ENABLE_MEMORY_CLEANUP
         
         # Initialize GCS service singleton
         self.gcs_service = None
@@ -168,6 +174,10 @@ class RadarProcessingService:
                 if use_cache and self.enable_cache and self.cache_service:
                     self.cache_service.cache_radar_frame(site_id, filepath, processed_array)
             
+            # Memory cleanup for Render
+            if self.enable_memory_cleanup:
+                gc.collect()
+            
             return processed_array
             
         except Exception as e:
@@ -201,6 +211,11 @@ class RadarProcessingService:
             with tempfile.NamedTemporaryFile(**temp_kwargs) as tmp_file:
                 tmp_file.write(file_data)
                 tmp_file.flush()
+                
+                # Clear file_data from memory before processing
+                del file_data
+                if self.enable_memory_cleanup:
+                    gc.collect()
                 
                 # Process the temporary file
                 return self._process_file_uncached(tmp_file.name)
@@ -463,9 +478,14 @@ class RadarProcessingService:
             gray_data = cv2.cvtColor(plot_data, cv2.COLOR_RGB2GRAY)
             final_data = cv2.resize(gray_data, self.output_size, interpolation=cv2.INTER_AREA)
             
-            # Clean up
+            # Clean up matplotlib resources
+            plt.close('all')
             fig.clf()
-            plt.close(fig)
+            del fig, axes, plot_data, gray_data
+            
+            # Force garbage collection on Render
+            if self.enable_memory_cleanup:
+                gc.collect()
             
             return final_data.astype(np.uint8)
             
@@ -477,7 +497,7 @@ class RadarProcessingService:
                              file_paths: List[str], 
                              site_id: str = None,
                              use_cache: bool = True,
-                             concurrent: bool = True) -> Tuple[np.ndarray, Dict[str, Any]]:
+                             concurrent: bool = None) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Process a sequence of NEXRAD files for model input with caching and concurrency.
         
@@ -492,8 +512,12 @@ class RadarProcessingService:
                 - processed_sequence: Array of shape (time, height, width, 1)
                 - metadata: Processing statistics and information
         """
+        # Auto-determine concurrent processing based on environment
+        if concurrent is None:
+            concurrent = self.max_workers > 1 and not IS_RENDER
+        
         logger.info(f"Processing sequence of {len(file_paths)} files "
-                   f"(cache={use_cache}, concurrent={concurrent})")
+                   f"(cache={use_cache}, concurrent={concurrent}, max_workers={self.max_workers})")
         
         # Extract site_id if not provided
         if site_id is None and file_paths:

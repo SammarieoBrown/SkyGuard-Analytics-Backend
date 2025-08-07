@@ -37,6 +37,7 @@ from app.services.nexrad_data_service import NEXRADDataService
 from app.services.radar_processing_service import RadarProcessingService
 from app.services.radar_mosaic_service import RadarMosaicService
 from app.utils.coordinate_utils import create_coordinate_metadata, get_site_coordinates
+from app.config import RADAR_MAX_BATCH_SIZE, IS_RENDER
 
 logger = logging.getLogger(__name__)
 
@@ -121,13 +122,16 @@ async def predict_weather_nowcast(
                         detail=f"No recent radar data available for site {request.site_id}"
                     )
                 
+                # Limit files for memory constraints on Render
+                max_files = min(20, RADAR_MAX_BATCH_SIZE + 5)  # Need extra for sequence
+                
                 # Process files to create model input with enhanced performance
                 model_input, processing_metadata = processor.create_model_input_sequence(
-                    recent_files[:20],  # Use up to 20 most recent files
+                    recent_files[:max_files],  # Limit files for memory
                     sequence_length=10,
                     site_id=request.site_id,
                     use_cache=True,
-                    concurrent=True
+                    concurrent=not IS_RENDER  # Sequential on Render, concurrent locally
                 )
                 
                 input_metadata = {
@@ -828,8 +832,11 @@ async def get_raw_radar_data(
                 detail=f"No recent radar data available for site {site_id}"
             )
         
-        # Limit to requested number of frames
-        recent_files = recent_files[:max_frames]
+        # Limit to requested number of frames (respect memory limits on Render)
+        effective_max_frames = min(max_frames, RADAR_MAX_BATCH_SIZE)
+        if IS_RENDER and max_frames > effective_max_frames:
+            logger.warning(f"Limiting frames from {max_frames} to {effective_max_frames} for memory constraints")
+        recent_files = recent_files[:effective_max_frames]
         
         # Process files and create frames
         frames = []

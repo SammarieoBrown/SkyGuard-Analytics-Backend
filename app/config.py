@@ -60,9 +60,10 @@ if IS_RENDER and RENDER_PERSISTENT_DISK:
     NEXRAD_DATA_DIR = Path(RENDER_PERSISTENT_DISK) / "radar"
     CACHE_DIR = Path(RENDER_PERSISTENT_DISK) / "cache"
     TEMP_DIR = Path(RENDER_PERSISTENT_DISK) / "tmp"
-    # Ensure directories exist
-    for dir_path in [NEXRAD_DATA_DIR, CACHE_DIR, TEMP_DIR]:
-        dir_path.mkdir(parents=True, exist_ok=True)
+    # Ensure directories exist (only if actually on Render, not simulating)
+    if os.path.exists("/data"):  # Only if persistent disk is mounted
+        for dir_path in [NEXRAD_DATA_DIR, CACHE_DIR, TEMP_DIR]:
+            dir_path.mkdir(parents=True, exist_ok=True)
 else:
     # Use local directories for development
     NEXRAD_DATA_DIR = BASE_DIR / "app" / "data" / "radar"
@@ -79,6 +80,16 @@ RADAR_OUTPUT_SIZE = (64, 64)  # Model input size
 RADAR_RANGE_LIMIT_KM = 150
 RADAR_SEQUENCE_LENGTH = 10  # Input sequence length for model
 RADAR_PREDICTION_LENGTH = 6  # Output prediction length
+
+# Memory-aware configuration for Render (2GB limit)
+if IS_RENDER:
+    RADAR_MAX_WORKERS = 1  # Sequential processing to save memory
+    RADAR_MAX_BATCH_SIZE = 5  # Limit frames per batch
+    ENABLE_MEMORY_CLEANUP = True  # Aggressive garbage collection
+else:
+    RADAR_MAX_WORKERS = 4  # Concurrent processing locally
+    RADAR_MAX_BATCH_SIZE = 20  # Higher batch size locally
+    ENABLE_MEMORY_CLEANUP = False  # Normal garbage collection
 
 # API settings
 API_V1_STR = os.getenv("API_V1_STR", "/api/v1")
