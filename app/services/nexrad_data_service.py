@@ -1,17 +1,17 @@
 """
 NEXRAD Data Service - Clean production implementation for fetching NEXRAD Level-II data.
-Fetches real-time radar data from Google Cloud Platform public storage.
+Fetches real-time radar data from AWS S3 public storage.
 """
 import os
 import requests
 import tempfile
-import tarfile
 import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 logger = logging.getLogger(__name__)
 
@@ -48,13 +48,14 @@ class NEXRADDataService:
         """
         self.data_dir = data_dir or self._get_default_data_dir()
         self.max_workers = max_workers
-        self.base_url = "https://storage.googleapis.com/gcp-public-data-nexrad-l2"
+        # AWS S3 NEXRAD Level-II bucket
+        self.base_url = "https://noaa-nexrad-level2.s3.amazonaws.com"
         self.lock = threading.Lock()
         
         # Ensure data directory exists
         os.makedirs(self.data_dir, exist_ok=True)
         
-        logger.info(f"NEXRADDataService initialized with data_dir: {self.data_dir}")
+        logger.info(f"NEXRADDataService initialized with AWS S3, data_dir: {self.data_dir}")
     
     def _get_default_data_dir(self) -> str:
         """Get default data directory path."""
@@ -74,30 +75,58 @@ class NEXRADDataService:
         os.makedirs(site_dir, exist_ok=True)
         return site_dir
     
-    def _build_nexrad_url(self, site_id: str, date: datetime, hour: int) -> str:
+    def _list_available_files(self, site_id: str, date: datetime) -> List[str]:
         """
-        Build URL for NEXRAD hourly tar file.
+        List available NEXRAD files for a specific site and date from AWS S3.
         
         Args:
             site_id: Radar site identifier (e.g., 'KAMX')
             date: Date for the data
-            hour: Hour of the day (0-23)
             
         Returns:
-            str: Complete URL for the tar file
+            list: List of available file keys
         """
-        start_time = f"{hour:02d}0000"
-        end_time = f"{hour:02d}5959"
+        # Construct the S3 listing URL
+        prefix = f"{date.year:04d}/{date.month:02d}/{date.day:02d}/{site_id}/"
+        list_url = f"{self.base_url}/?prefix={prefix}"
         
-        filename = (f"NWS_NEXRAD_NXL2DPBL_{site_id}_{date.strftime('%Y%m%d')}{start_time}_"
-                   f"{date.strftime('%Y%m%d')}{end_time}.tar")
-        
-        url = f"{self.base_url}/{date.year:04d}/{date.month:02d}/{date.day:02d}/{site_id}/{filename}"
-        return url
+        try:
+            response = requests.get(list_url, timeout=10)
+            response.raise_for_status()
+            
+            # Parse XML response
+            root = ET.fromstring(response.text)
+            namespace = {'s3': 'http://s3.amazonaws.com/doc/2006-03-01/'}
+            
+            files = []
+            for content in root.findall('.//s3:Contents', namespace):
+                key = content.find('s3:Key', namespace)
+                if key is not None and key.text:
+                    # Filter for actual data files (ending with _V06)
+                    if key.text.endswith('_V06') or key.text.endswith('_V06.gz'):
+                        files.append(key.text)
+            
+            return sorted(files)
+            
+        except Exception as e:
+            logger.debug(f"Could not list files for {site_id} on {date}: {e}")
+            return []
     
-    def _download_hourly_data(self, site_id: str, date: datetime, hour: int) -> Tuple[int, List[str]]:
+    def _build_file_url(self, file_key: str) -> str:
         """
-        Download and extract hourly NEXRAD data for a site.
+        Build full URL for a specific file.
+        
+        Args:
+            file_key: S3 key for the file
+            
+        Returns:
+            str: Complete URL for the file
+        """
+        return f"{self.base_url}/{file_key}"
+    
+    def _download_files_for_hour(self, site_id: str, date: datetime, hour: int) -> Tuple[int, List[str]]:
+        """
+        Download NEXRAD files for a specific hour from AWS S3.
         
         Args:
             site_id: Radar site identifier
@@ -108,50 +137,58 @@ class NEXRADDataService:
             tuple: (number_of_files, list_of_filenames)
         """
         try:
-            url = self._build_nexrad_url(site_id, date, hour)
             site_dir = self._create_site_directory(site_id, date)
             
-            # Check if URL exists
-            response = requests.head(url, timeout=10)
-            if response.status_code != 200:
-                return 0, []  # No data available for this hour
+            # List available files for this date
+            available_files = self._list_available_files(site_id, date)
+            
+            # Filter files for the specific hour
+            hour_str = f"{hour:02d}"
+            hour_files = [f for f in available_files if f"_{hour_str}" in f]
+            
+            if not hour_files:
+                return 0, []
             
             # Check if we already have files from this hour
             hour_pattern = f"{site_id}{date.strftime('%Y%m%d')}_{hour:02d}"
             existing_files = [f for f in os.listdir(site_dir) if f.startswith(hour_pattern)]
-            if existing_files:
+            if len(existing_files) >= len(hour_files):
                 return len(existing_files), existing_files  # Already downloaded
             
-            # Download tar file
-            self._log(site_id, f"Downloading hour {hour:02d}")
-            response = requests.get(url, timeout=300, stream=True)
-            response.raise_for_status()
-            
-            # Extract files
-            extracted_files = []
-            with tempfile.NamedTemporaryFile() as temp_tar:
-                # Save tar content
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        temp_tar.write(chunk)
-                temp_tar.flush()
+            # Download individual files
+            downloaded_files = []
+            for file_key in hour_files[:6]:  # Limit to 6 files per hour (every ~10 minutes)
+                filename = os.path.basename(file_key)
+                file_path = os.path.join(site_dir, filename)
                 
-                # Extract tar file
-                with tarfile.open(temp_tar.name, 'r') as tar:
-                    for member in tar.getmembers():
-                        if member.isfile():
-                            # Extract to site directory
-                            filename = os.path.basename(member.name)
-                            member.name = filename
-                            tar.extract(member, site_dir)
-                            extracted_files.append(filename)
+                # Skip if already exists
+                if os.path.exists(file_path):
+                    downloaded_files.append(filename)
+                    continue
+                
+                # Download file
+                file_url = self._build_file_url(file_key)
+                try:
+                    response = requests.get(file_url, timeout=60, stream=True)
+                    response.raise_for_status()
+                    
+                    # Save file
+                    with open(file_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                    
+                    downloaded_files.append(filename)
+                    
+                except Exception as e:
+                    logger.debug(f"Failed to download {filename}: {e}")
+                    continue
             
-            self._log(site_id, f"✅ Hour {hour:02d}: {len(extracted_files)} files")
-            return len(extracted_files), extracted_files
+            if downloaded_files:
+                self._log(site_id, f"✅ Hour {hour:02d}: {len(downloaded_files)} files")
             
-        except requests.RequestException as e:
-            self._log(site_id, f"❌ Download failed for hour {hour:02d}: {str(e)}")
-            return 0, []
+            return len(downloaded_files), downloaded_files
+            
         except Exception as e:
             self._log(site_id, f"❌ Error processing hour {hour:02d}: {str(e)}")
             return 0, []
@@ -194,7 +231,7 @@ class NEXRADDataService:
             while current_time <= end_time:
                 hour = current_time.hour
                 future = executor.submit(
-                    self._download_hourly_data, 
+                    self._download_files_for_hour, 
                     site_id, 
                     current_time.date() if hasattr(current_time, 'date') else current_time,
                     hour
@@ -230,7 +267,7 @@ class NEXRADDataService:
         """
         Download only the latest N files for immediate processing (optimized for speed).
         
-        This method downloads individual files instead of entire hourly archives,
+        This method downloads individual files directly from AWS S3,
         significantly reducing download time for real-time predictions.
         
         Args:
@@ -257,7 +294,7 @@ class NEXRADDataService:
         }
         
         try:
-            # Check what files we already have
+            # Check what files we already have locally
             existing_files = self.get_available_files(site_id, hours_back=6, max_files=max_files)
             
             if len(existing_files) >= max_files:
@@ -266,21 +303,65 @@ class NEXRADDataService:
                 logger.info(f"Already have {len(existing_files)} recent files for {site_id}")
                 return results
             
-            # If we need more files, try to download recent data
-            needed_files = max_files - len(existing_files)
-            logger.info(f"Need to download {needed_files} more files for {site_id}")
+            # Try to download from most recent dates
+            downloaded_count = 0
+            all_files = []
             
-            # Download recent hourly data (last 3 hours should be sufficient)
-            download_result = self.download_recent_data(site_id, hours_back=3)
+            # Check last 3 days
+            for days_back in range(3):
+                date = datetime.utcnow().date() - timedelta(days=days_back)
+                site_dir = self._create_site_directory(site_id, date)
+                
+                # List available files for this date
+                available_files = self._list_available_files(site_id, date)
+                
+                if available_files:
+                    # Sort by timestamp (most recent first)
+                    available_files.sort(reverse=True)
+                    
+                    # Download up to max_files
+                    for file_key in available_files[:max_files - downloaded_count]:
+                        filename = os.path.basename(file_key)
+                        file_path = os.path.join(site_dir, filename)
+                        
+                        # Skip if already exists
+                        if os.path.exists(file_path):
+                            all_files.append(file_path)
+                            continue
+                        
+                        # Download file
+                        file_url = self._build_file_url(file_key)
+                        try:
+                            response = requests.get(file_url, timeout=60, stream=True)
+                            response.raise_for_status()
+                            
+                            # Save file
+                            with open(file_path, 'wb') as f:
+                                for chunk in response.iter_content(chunk_size=8192):
+                                    if chunk:
+                                        f.write(chunk)
+                            
+                            all_files.append(file_path)
+                            downloaded_count += 1
+                            results["files_downloaded"] += 1
+                            
+                            if downloaded_count >= max_files:
+                                break
+                                
+                        except Exception as e:
+                            logger.debug(f"Failed to download {filename}: {e}")
+                            results["download_errors"] += 1
+                
+                if downloaded_count >= max_files:
+                    break
             
-            # Get updated file list
-            updated_files = self.get_available_files(site_id, hours_back=6, max_files=max_files)
-            results["files_downloaded"] = len(updated_files) - len(existing_files)
-            results["file_list"] = updated_files
+            # Sort by modification time (most recent first)
+            all_files.sort(key=lambda x: os.path.getmtime(x) if os.path.exists(x) else 0, reverse=True)
+            results["file_list"] = all_files[:max_files]
             
         except Exception as e:
             logger.error(f"Failed to download latest files for {site_id}: {e}")
-            results["download_errors"] = 1
+            results["download_errors"] += 1
             results["error"] = str(e)
         
         results["end_time"] = datetime.now()
@@ -355,7 +436,8 @@ class NEXRADDataService:
             
             if os.path.exists(date_dir):
                 for filename in os.listdir(date_dir):
-                    if filename.endswith('.ar2v'):
+                    # AWS S3 files end with _V06 or _V06.gz
+                    if filename.endswith('_V06') or filename.endswith('_V06.gz') or filename.endswith('.ar2v'):
                         file_path = os.path.join(date_dir, filename)
                         files.append(file_path)
             
