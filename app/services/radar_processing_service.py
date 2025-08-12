@@ -670,14 +670,28 @@ class RadarProcessingService:
         sequence_array, metadata = self.process_file_sequence(
             file_paths, site_id, use_cache, concurrent)
         
-        # Take the most recent frames if we have more than needed
+        # Handle sequence length adjustment
         if sequence_array.shape[0] > sequence_length:
+            # Take the most recent frames if we have more than needed
             sequence_array = sequence_array[-sequence_length:]
             logger.info(f"Trimmed sequence to last {sequence_length} frames")
         elif sequence_array.shape[0] < sequence_length:
-            raise ValueError(
-                f"Not enough frames: got {sequence_array.shape[0]}, need {sequence_length}"
-            )
+            # Pad sequence by repeating the last frame if we don't have enough
+            frames_needed = sequence_length - sequence_array.shape[0]
+            logger.warning(f"Not enough frames: got {sequence_array.shape[0]}, need {sequence_length}. Padding with last frame.")
+            
+            # Repeat the last frame to fill the sequence
+            if sequence_array.shape[0] > 0:
+                last_frame = sequence_array[-1:, :, :, :]
+                padding = np.repeat(last_frame, frames_needed, axis=0)
+                sequence_array = np.concatenate([sequence_array, padding], axis=0)
+                metadata["padded_frames"] = frames_needed
+            else:
+                # If no frames at all, create empty frames
+                empty_frame = np.zeros((1, 64, 64, 1), dtype=np.float32)
+                sequence_array = np.repeat(empty_frame, sequence_length, axis=0)
+                metadata["padded_frames"] = sequence_length
+                logger.warning("No frames available, using empty frames")
         
         # Add batch dimension
         model_input = np.expand_dims(sequence_array, axis=0)
