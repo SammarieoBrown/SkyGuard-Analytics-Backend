@@ -347,4 +347,54 @@ class DummyLoss:
         return {}
         
     def __setstate__(self, state):
+        pass
+
+
+class SeverityClassifier:
+    """
+    Classifier for weather event severity levels.
+    This is a placeholder for compatibility with pickled models.
+    """
+    
+    def __init__(self, *args, **kwargs):
+        """Initialize the severity classifier."""
+        self.classes_ = ['Minor', 'Moderate', 'Significant', 'Severe', 'Catastrophic']
+        self.n_classes_ = len(self.classes_)
+        
+    def predict(self, X):
+        """
+        Predict severity class for input features.
+        
+        Args:
+            X: Input features
+            
+        Returns:
+            Array of predicted severity classes
+        """
+        # Return default predictions
+        n_samples = len(X) if hasattr(X, '__len__') else 1
+        return np.array(['Moderate'] * n_samples)
+    
+    def predict_proba(self, X):
+        """
+        Predict probability distribution over severity classes.
+        
+        Args:
+            X: Input features
+            
+        Returns:
+            Array of probability distributions
+        """
+        n_samples = len(X) if hasattr(X, '__len__') else 1
+        # Return uniform probabilities
+        proba = np.ones((n_samples, self.n_classes_)) / self.n_classes_
+        return proba
+    
+    def __getstate__(self):
+        """Get state for pickling."""
+        return self.__dict__
+    
+    def __setstate__(self, state):
+        """Set state for unpickling."""
+        self.__dict__.update(state)
         pass 

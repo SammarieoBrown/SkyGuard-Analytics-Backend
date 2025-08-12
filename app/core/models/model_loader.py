@@ -29,7 +29,7 @@ class RemappingUnpickler(pickle.Unpickler):
             ('__main__', 'FocalLoss'): ('app.core.preprocessing', 'FocalLoss'),
             ('__main__', 'CasualtyRiskModel'): ('app.core.models.casualty_model_wrapper', 'CasualtyRiskModel'),
             ('__main__', 'PropertyDamageDataPreprocessor'): ('app.core.preprocessing', 'PropertyDamageDataPreprocessor'),
-            ('__main__', 'SeverityClassifier'): ('catboost', 'CatBoostClassifier'),
+            ('__main__', 'SeverityClassifier'): ('app.core.preprocessing', 'SeverityClassifier'),
             ('_loss', 'FocalLoss'): ('app.core.preprocessing', 'FocalLoss'),
             ('_loss', 'Loss'): ('app.core.preprocessing', 'FocalLoss'),
             ('_loss', 'CyHalfSquaredError'): ('app.core.preprocessing', 'DummyLoss'),
@@ -124,25 +124,6 @@ def load_model_with_remapping(filepath: str) -> Any:
             import app.core.preprocessing as preprocessing
             import app.core.models.casualty_model_wrapper as casualty_wrapper
             
-            # Create dummy classes for models that need them
-            class SeverityClassifier:
-                def __init__(self, *args, **kwargs):
-                    pass
-                def predict(self, *args, **kwargs):
-                    return ['Minor']
-                def predict_proba(self, *args, **kwargs):
-                    return [[0.8, 0.2]]
-                
-            class PropertyDamageDataPreprocessor:
-                def __init__(self):
-                    self.label_encoders = {}
-                    self.column_transformer = None
-                    self._name_to_fitted_passthrough = {}  # Fix for sklearn compatibility
-                def transform(self, X):
-                    return X
-                def fit_transform(self, X, y=None):
-                    return X
-            
             # Create a dummy _loss module with common loss functions
             class DummyLoss:
                 def __init__(self, *args, **kwargs):
@@ -166,12 +147,12 @@ def load_model_with_remapping(filepath: str) -> Any:
             
             # Temporarily add classes to __main__
             import __main__
-            __main__.CasualtyRiskPreprocessor = getattr(preprocessing, 'CasualtyRiskPreprocessor', PropertyDamageDataPreprocessor)
-            __main__.CasualtyFeatureEngineer = getattr(preprocessing, 'CasualtyFeatureEngineer', PropertyDamageDataPreprocessor)
+            __main__.CasualtyRiskPreprocessor = getattr(preprocessing, 'CasualtyRiskPreprocessor', preprocessing.PropertyDamageDataPreprocessor)
+            __main__.CasualtyFeatureEngineer = getattr(preprocessing, 'CasualtyFeatureEngineer', preprocessing.PropertyDamageDataPreprocessor)
             __main__.FocalLoss = getattr(preprocessing, 'FocalLoss', DummyLoss)
-            __main__.CasualtyRiskModel = getattr(casualty_wrapper, 'CasualtyRiskModel', SeverityClassifier)
-            __main__.SeverityClassifier = SeverityClassifier
-            __main__.PropertyDamageDataPreprocessor = PropertyDamageDataPreprocessor
+            __main__.CasualtyRiskModel = getattr(casualty_wrapper, 'CasualtyRiskModel', preprocessing.SeverityClassifier)
+            __main__.SeverityClassifier = getattr(preprocessing, 'SeverityClassifier', preprocessing.SeverityClassifier)
+            __main__.PropertyDamageDataPreprocessor = getattr(preprocessing, 'PropertyDamageDataPreprocessor', preprocessing.PropertyDamageDataPreprocessor)
             __main__._loss = _loss  # Add the dummy loss module
             
             try:

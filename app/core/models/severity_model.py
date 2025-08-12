@@ -81,22 +81,31 @@ class SeverityModel:
             raise FileNotFoundError(f"Model file not found: {model_path}")
 
         try:
-            # Try loading with joblib first
-            model = joblib.load(model_path)
-            logger.info("Severity model loaded successfully with joblib")
+            # Use the custom model loader that handles class remapping
+            from app.core.models.model_loader import load_model_with_remapping
+            model = load_model_with_remapping(str(model_path))
+            logger.info("Severity model loaded successfully with custom loader")
             return model
         except Exception as e:
-            logger.warning(f"Failed to load model with joblib: {str(e)}. Trying pickle...")
+            logger.warning(f"Failed to load model with custom loader: {str(e)}. Trying joblib...")
             
             try:
-                # Fallback to pickle
-                with open(model_path, 'rb') as file:
-                    model = pickle.load(file)
-                logger.info("Severity model loaded successfully with pickle")
+                # Fallback to joblib
+                model = joblib.load(model_path)
+                logger.info("Severity model loaded successfully with joblib")
                 return model
-            except Exception as e:
-                logger.error(f"Failed to load severity model: {str(e)}")
-                raise RuntimeError(f"Failed to load severity model: {str(e)}")
+            except Exception as e2:
+                logger.warning(f"Failed to load model with joblib: {str(e2)}. Trying pickle...")
+                
+                try:
+                    # Fallback to pickle
+                    with open(model_path, 'rb') as file:
+                        model = pickle.load(file)
+                    logger.info("Severity model loaded successfully with pickle")
+                    return model
+                except Exception as e3:
+                    logger.error(f"Failed to load severity model: {str(e3)}")
+                    raise RuntimeError(f"Failed to load severity model: {str(e3)}")
     
     def create_dataframe(self, params: Dict[str, Any]) -> pd.DataFrame:
         """
@@ -203,27 +212,34 @@ class SeverityModel:
         # Create DataFrame
         df = pd.DataFrame([features])
         
+        # Extract preprocessor from dict model if needed
+        preprocessor = None
+        if isinstance(self.model, dict):
+            preprocessor = self.model.get('preprocessor')
+        elif hasattr(self.model, 'preprocessor'):
+            preprocessor = self.model.preprocessor
+            
         # If we have a preprocessor, use it to encode categorical features
-        if hasattr(self.model, 'preprocessor') and hasattr(self.model.preprocessor, 'label_encoders'):
+        if preprocessor and hasattr(preprocessor, 'label_encoders'):
             # Encode categorical features
-            if 'event_type' in self.model.preprocessor.label_encoders:
-                le = self.model.preprocessor.label_encoders['event_type']
+            if 'event_type' in preprocessor.label_encoders:
+                le = preprocessor.label_encoders['event_type']
                 df['event_type_encoded'] = df['event_type'].apply(
                     lambda x: le.transform([x])[0] if x in le.classes_ else 0
                 )
             else:
                 df['event_type_encoded'] = 0
                 
-            if 'state' in self.model.preprocessor.label_encoders:
-                le = self.model.preprocessor.label_encoders['state']
+            if 'state' in preprocessor.label_encoders:
+                le = preprocessor.label_encoders['state']
                 df['state_encoded'] = df['state'].apply(
                     lambda x: le.transform([x])[0] if x in le.classes_ else 0
                 )
             else:
                 df['state_encoded'] = 0
                 
-            if 'cz_type' in self.model.preprocessor.label_encoders:
-                le = self.model.preprocessor.label_encoders['cz_type']
+            if 'cz_type' in preprocessor.label_encoders:
+                le = preprocessor.label_encoders['cz_type']
                 df['cz_type_encoded'] = df['cz_type'].apply(
                     lambda x: le.transform([x])[0] if x in le.classes_ else 0
                 )
@@ -239,10 +255,16 @@ class SeverityModel:
         df = df.drop(['event_type', 'state', 'cz_type'], axis=1)
         
         # Ensure columns are in the right order if we have feature_columns
-        if hasattr(self.model, 'feature_columns'):
+        feature_columns = None
+        if isinstance(self.model, dict):
+            feature_columns = self.model.get('feature_columns')
+        elif hasattr(self.model, 'feature_columns'):
+            feature_columns = self.model.feature_columns
+            
+        if feature_columns:
             # Reorder columns to match expected order
             ordered_df = pd.DataFrame()
-            for col in self.model.feature_columns:
+            for col in feature_columns:
                 if col in df.columns:
                     ordered_df[col] = df[col]
                 else:
@@ -266,16 +288,23 @@ class SeverityModel:
             # Create dataframe from parameters
             df = self.create_dataframe(params)
             
+            # Extract actual model if it's wrapped in a dictionary
+            actual_model = self.model
+            if isinstance(self.model, dict):
+                actual_model = self.model.get('model')
+                if actual_model is None:
+                    raise ValueError("No model found in model package")
+            
             # Make prediction
-            if hasattr(self.model, "predict_proba"):
+            if hasattr(actual_model, "predict_proba"):
                 # For models with probability estimates, get the class probabilities
-                probabilities = self.model.predict_proba(df)[0]
-                severity_class = self.model.predict(df)[0]
+                probabilities = actual_model.predict_proba(df)[0]
+                severity_class = actual_model.predict(df)[0]
                 
                 # Map numeric classes to severity names
                 severity_names = ['Minor', 'Moderate', 'Significant', 'Severe', 'Catastrophic']
-                if hasattr(self.model, "classes_"):
-                    class_names = self.model.classes_
+                if hasattr(actual_model, "classes_"):
+                    class_names = actual_model.classes_
                     # Create probability distribution by severity name
                     class_probs = {}
                     for idx, prob in zip(class_names, probabilities):
@@ -287,7 +316,7 @@ class SeverityModel:
                     class_probs = {severity_names[i]: float(prob) for i, prob in enumerate(probabilities) if i < len(severity_names)}
             else:
                 # For models without probability estimates
-                severity_class = self.model.predict(df)[0]
+                severity_class = actual_model.predict(df)[0]
                 # Create a simulated high confidence
                 class_probs = {str(severity_class): 0.95}
             
