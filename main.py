@@ -59,10 +59,30 @@ app = FastAPI(
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001", 
+        "http://127.0.0.1:3000",
+        "https://localhost:3000",
+        "*"  # Fallback for any other origins
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Accept",
+        "Accept-Language", 
+        "Content-Language",
+        "Content-Type",
+        "Authorization",
+        "X-Requested-With",
+        "Origin",
+        "User-Agent",
+        "DNT",
+        "Cache-Control",
+        "X-Mx-ReqToken",
+        "Keep-Alive",
+        "X-CSRFToken"
+    ],
 )
 
 # Include API router
@@ -132,6 +152,12 @@ async def root():
 async def health_check():
     """Health check endpoint."""
     return {"status": "ok"}
+
+
+@app.options("/{path:path}")
+async def options_handler(path: str):
+    """Handle CORS preflight requests for all paths."""
+    return {"detail": "OK"}
 
 
 @app.get("/hello/{name}")
